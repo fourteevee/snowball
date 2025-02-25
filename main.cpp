@@ -14,11 +14,10 @@
 
 ////////////////////////////////////////////////////////////////////////////////
 
-// Windows file stuff
-#include <windows.h>
+// LINUX file stuff
 #include <dirent.h>
 #define GetCurrentDir _getcwd
-#define PathSeparator "\\"
+#define PathSeparator "/"
 
 #include <getopt.h>
 
@@ -34,6 +33,11 @@
 #include <iterator>
 #include <vector>
 #include <map>
+
+#include <unistd.h>      // for getcwd() and readlink()
+#include <limits.h>      // for PATH_MAX
+#include <string>
+#include <cstring>
 
 using namespace std;
 
@@ -1020,43 +1024,40 @@ bool openInputCorpus(string const &fileName,
 /// ////////////////////////////////////////////////////////////////////////////
 // Stolen shamelessly from:
 // http://www.daniweb.com/software-development/cpp/threads/149627/
-vector<string> travelDirectory(string directory, bool fullPath) {
-  vector<string> fileList;
-  DIR *dir;
-  struct dirent *ent;
-
-  // Open the directory and read from it until we reach the end.
-  if ((dir=opendir(directory.c_str())) != NULL) {
-    while((ent=readdir(dir)) != NULL) {
-
-      // Return the full path and name, or just the name of the file.
-      if (fullPath) {
-        stringstream fullname;
-        fullname << directory << PathSeparator << ent->d_name;
-        fileList.push_back(fullname.str());
-      } else {
-        fileList.push_back(ent->d_name);
+// Helper function to list entries in a directory.
+// This is a simple replacement for the Windows-specific travelDirectory() call.
+vector<string> travelDirectory(const string &directory, bool /*unusedFlag*/) {
+  vector<string> files;
+  DIR* dir = opendir(directory.c_str());
+  if (dir) {
+      struct dirent *entry;
+      while ((entry = readdir(dir)) != nullptr) {
+          files.push_back(entry->d_name);
       }
-    }
-    closedir(dir);
+      closedir(dir);
   }
-  return fileList;
+  return files;
 }
-void travelDirectoryRecursive(string directory, vector<string> *fullList) {
-  vector<string> fileList = travelDirectory(directory,false);
 
-  for (vector<string>::iterator i=fileList.begin(); i!=fileList.end(); ++i) {
 
-    // Ignore the two "dot" abstraction directories.
-    if (strcmp((*i).c_str(), ".") &&
-        strcmp((*i).c_str(), "..")) {
+// Recursively traverse a directory and add full file/directory paths to fullList.
+void travelDirectoryRecursive(const string &directory, vector<string> &fullList) {
+  vector<string> fileList = travelDirectory(directory, false);
 
-      // Return the full path and name of the file.
-      stringstream fullname;
-      fullname << directory << PathSeparator << (*i);
-      fullList->push_back(fullname.str());
-      travelDirectoryRecursive(fullname.str(), fullList);
-    }
+  for (vector<string>::iterator i = fileList.begin(); i != fileList.end(); ++i) {
+      // Ignore the two "dot" abstraction directories.
+      if (strcmp(i->c_str(), ".") != 0 &&
+          strcmp(i->c_str(), "..") != 0) {
+
+          // Construct the full path (Linux uses "/" as the path separator).
+          stringstream fullname;
+          fullname << directory << "/" << *i;
+          string fullPath = fullname.str();
+          fullList.push_back(fullPath);
+
+          // Recursively traverse subdirectories.
+          travelDirectoryRecursive(fullPath, fullList);
+      }
   }
 }
 /// ////////////////////////////////////////////////////////////////////////////
@@ -1072,7 +1073,7 @@ bool loadInputFilesFromDirectory(string const &directoryPath) {
   // Get full paths of all files to read.
   // Recurse through sub-directories if necessary.
   if (recurseRawDirs) {
-    travelDirectoryRecursive(directoryPath,&inputFiles);
+    travelDirectoryRecursive(directoryPath, inputFiles);
   } else {
     inputFiles = travelDirectory(directoryPath,true);
   }
@@ -1731,36 +1732,38 @@ bool loadSeedPhrasesFromFile(vector<string> &inputVector,
 
   return true;
 }
-/// ////////////////////////////////////////////////////////////////////////////
-// Windows only. Set the value of the "workingPath" global.
+
+// Linux version of setPathWorkingDirectory using getcwd()
 bool setPathWorkingDirectory() {
-  char cCurrentPath[FILENAME_MAX];
-  bool pathFound = GetCurrentDir(cCurrentPath, sizeof(cCurrentPath));
+  char cCurrentPath[PATH_MAX];
+  if (getcwd(cCurrentPath, sizeof(cCurrentPath)) == nullptr) {
+      return false;
+  }
   workingPath = cCurrentPath;
-  return pathFound;
+  return true;
 }
 
-// Windows only. Set the values of the "programPath" and "programFile" globals.
+// Linux version of setPathAndFileName using readlink() on "/proc/self/exe"
 bool setPathAndFileName() {
-
-  // Use Windows API GetModuleFileName() function.
-  TCHAR pathOfEXEchar[2048];
-  int bytes = GetModuleFileName(NULL, pathOfEXEchar, 2048);
-  if (bytes == 0) return false;
+  char pathOfEXEchar[2048];
+  // readlink() does not null-terminate the buffer, so we reserve one extra byte.
+  ssize_t bytes = readlink("/proc/self/exe", pathOfEXEchar, sizeof(pathOfEXEchar) - 1);
+  if (bytes == -1) {
+      return false;
+  }
+  pathOfEXEchar[bytes] = '\0';
 
   string pathOfEXE = pathOfEXEchar;
-
-  // Separate the string to Path and File names.
-  std::size_t found = pathOfEXE.find_last_of("/\\");
-  bool pathSeparatorFound = (found != std::string::npos);
-
-  // Set the variables if found.
-  if (pathSeparatorFound) {
-    programPath = pathOfEXE.substr(0,found);
-    programFile = pathOfEXE.substr(found+1);
+  // Find the last '/' in the full path.
+  size_t found = pathOfEXE.find_last_of('/');
+  if (found == string::npos) {
+      return false;
   }
 
-  return pathSeparatorFound;
+  // Set the global variables.
+  programPath = pathOfEXE.substr(0, found);
+  programFile = pathOfEXE.substr(found + 1);
+  return true;
 }
 /// ////////////////////////////////////////////////////////////////////////////
 int main(int argc, char* argv[]) {
